@@ -1,0 +1,61 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://scripts/track.gd" id="1_track"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_startfinish"]
+size = Vector2(200, 20)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_outer_wall"]
+size = Vector2(10, 10)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_inner_wall"]
+size = Vector2(10, 10)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_grass"]
+size = Vector2(10, 10)
+
+[node name="Track" type="Node2D"]
+script = ExtResource("1_track")
+
+[node name="Grass" type="StaticBody2D" parent="."]
+collision_layer = 1
+
+[node name="OuterWall" type="StaticBody2D" parent="."]
+collision_layer = 1
+
+[node name="InnerWall" type="StaticBody2D" parent="."]
+collision_layer = 1
+
+[node name="RoadSurface" type="Polygon2D" parent="."]
+z_index = -10
+color = Color(0.15, 0.15, 0.15, 1)
+
+[node name="GrassSurface" type="Polygon2D" parent="."]
+z_index = -11
+color = Color(0.28, 0.52, 0.18, 1)
+
+[node name="AmberAnchor" type="Polygon2D" parent="."]
+
+[node name="StartFinishLine" type="Area2D" parent="."]
+collision_layer = 2
+collision_mask = 1
+script = ExtResource("1_track")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="StartFinishLine"]
+shape = SubResource("RectangleShape2D_startfinish")
+
+[node name="StartFinishVisual" type="Polygon2D" parent="."]
+
+[node name="Checkpoints" type="Node2D" parent="."]
+
+[node name="Hazards" type="Node2D" parent="."]
+
+[node name="OuterWallOutline" type="Line2D" parent="."]
+z_index = -5
+width = 3.0
+default_color = Color(1.0, 1.0, 1.0, 1.0)
+
+[node name="InnerWallOutline" type="Line2D" parent="."]
+z_index = -5
+width = 3.0
+default_color = Color(1.0, 1.0, 1.0, 1.0)

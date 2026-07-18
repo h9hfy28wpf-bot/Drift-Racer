@@ -1,0 +1,5 @@
+res://scripts/track.gd
+res://scripts/car.gd
+res://scripts/start_finish.gd
+res://scripts/race_manager.gd
+res://scripts/race_scene.gd

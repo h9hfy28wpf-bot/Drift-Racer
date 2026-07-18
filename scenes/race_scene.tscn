@@ -1,0 +1,29 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/race_scene.gd" id="1_race_scene"]
+[ext_resource type="PackedScene" path="res://scenes/track.tscn" id="2_track"]
+[ext_resource type="PackedScene" path="res://scenes/car.tscn" id="3_car"]
+
+[node name="RaceScene" type="Node2D"]
+script = ExtResource("1_race_scene")
+
+[node name="World" type="Node2D" parent="."]
+
+[node name="Track" parent="World" instance=ExtResource("2_track")]
+
+[node name="Car1" parent="World" instance=ExtResource("3_car")]
+z_index = 2
+
+[node name="Car2" parent="World" instance=ExtResource("3_car")]
+z_index = 2
+
+[node name="Car3" parent="World" instance=ExtResource("3_car")]
+z_index = 2
+
+[node name="Car4" parent="World" instance=ExtResource("3_car")]
+z_index = 2
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position_smoothing_enabled = true
+position_smoothing_speed = 5.0
+current = true

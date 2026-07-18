@@ -1,0 +1,16 @@
+[gd_scene load_steps=4 format=3 uid="uid://bvcjy0qngg6p7"]
+
+[ext_resource type="Script" path="res://scripts/car.gd" id="1_car_script"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_car"]
+size = Vector2(24, 48)
+
+[node name="Car" type="CharacterBody2D"]
+collision_layer = 2
+collision_mask = 3
+script = ExtResource("1_car_script")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_car")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
