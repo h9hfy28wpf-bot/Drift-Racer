@@ -233,5 +233,5 @@ func get_player_median_progress() -> float:
 		var lap_score: float = float(_car_laps.get(car, 0)) + _car_last_progress.get(car, 0.0)
 		progresses.append(lap_score)
 	progresses.sort()
-	var mid: int = int(progresses.size()) / 2
+	var mid: int = int(progresses.size() / 2.0)
 	return progresses[mid]

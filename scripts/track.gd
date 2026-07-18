@@ -43,9 +43,9 @@ func _ready() -> void:
 
 
 ## Headless validation: checks if a seed produces a valid closed loop.
-static func validate_track(seed: int) -> bool:
+static func validate_track(seed_value: int) -> bool:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = seed
+	rng.seed = seed_value
 	var anchors: Array[Vector2] = []
 	var sector_deg: float = 360.0 / float(SECTORS)
 	var jitter_rad: float = deg_to_rad(JITTER_DEG)

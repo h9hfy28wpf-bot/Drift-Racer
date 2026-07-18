@@ -212,7 +212,7 @@ func _physics_process(delta: float) -> void:
 		velocity += heading * boost_extra * delta * 4.0
 
 	# 6. Speed clamp (includes surface multiplier)
-	var effective_max_clamp: float = MAX_SPEED * surface_speed_mult * 1.2
+	var _effective_max_clamp: float = MAX_SPEED * surface_speed_mult * 1.2
 	var forward_speed_now: float = velocity.length()
 	if forward_speed_now > MAX_SPEED * 1.2:
 		velocity = velocity.normalized() * MAX_SPEED * 1.2

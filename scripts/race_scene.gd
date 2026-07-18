@@ -1,6 +1,5 @@
 extends Node2D
 
-const AIDriver = preload("res://scripts/ai_driver.gd")
 
 @export var track_seed: int = -1
 
@@ -50,7 +49,6 @@ func _ready() -> void:
 
 	# Place cars at staggered starting grid (2 rows, 2 columns)
 	for i in range(4):
-		var car: CharacterBody2D = _cars[i]
 		_cars[i].track = _track
 		_cars[i].setup(i)
 		_cars[i].position = _track.get_start_position(i)
