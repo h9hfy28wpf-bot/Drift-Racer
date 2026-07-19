@@ -18,4 +18,6 @@ func _on_body_entered(body: Node2D) -> void:
 	if elapsed_ms < GRACE_PERIOD_MS:
 		return
 
-	RaceManager.cross_start_finish(body)
+	var race_manager: Node = get_node_or_null("/root/RaceManager")
+	if race_manager:
+		race_manager.cross_start_finish(body)

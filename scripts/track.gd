@@ -8,11 +8,11 @@ const SECTORS: int = 8
 const SPLINE_SAMPLES: int = 160
 const RELAX_PASSES: int = 2
 const RELAX_WEIGHT: float = 0.15
-const TRACK_WIDTH: float = 200.0
+const TRACK_WIDTH: float = 400.0
 const WALL_THICKNESS: float = 48.0
-const SPAWN_BEHIND: float = 80.0
-const RADIUS_MIN: float = 180.0
-const RADIUS_MAX: float = 420.0
+const SPAWN_BEHIND: float = 160.0
+const RADIUS_MIN: float = 360.0
+const RADIUS_MAX: float = 840.0
 const JITTER_DEG: float = 20.0
 const WALL_MARGIN: float = 30.0
 const MIN_TURN_RADIUS: float = TRACK_WIDTH * 0.5 + WALL_MARGIN
@@ -668,10 +668,12 @@ func get_center_position_at(progress: float) -> Vector2:
 func _compute_track_extents() -> Vector2:
 	var max_x: float = 0.0
 	var max_y: float = 0.0
-	for pt in _road_outer:
-		max_x = maxf(max_x, abs(pt.x))
-		max_y = maxf(max_y, abs(pt.y))
-	return Vector2(max_x + 200.0, max_y + 200.0)
+	for edge in [_road_outer, _road_inner]:
+		for point in edge:
+			max_x = maxf(max_x, absf(point.x))
+			max_y = maxf(max_y, absf(point.y))
+	var padding: float = WALL_THICKNESS + 200.0
+	return Vector2(max_x + padding, max_y + padding)
 
 
 ## Viewport-fit zoom for whole-track view.
@@ -694,7 +696,7 @@ func get_start_position(player_index: int) -> Vector2:
 	var behind: Vector2 = road_center - edge_dir * SPAWN_BEHIND
 
 	var perp: Vector2 = Vector2(-edge_dir.y, edge_dir.x)
-	var offset: float = (float(player_index) - 0.5) * 40.0
+	var offset: float = (float(player_index) - 0.5) * 80.0
 
 	return behind + perp * offset
 

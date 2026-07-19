@@ -7,7 +7,7 @@ var failures: int = 0
 var seed_count: int = 60
 
 
-func _ready() -> void:
+func _init() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--seeds="):
 			seed_count = int(arg.trim_prefix("--seeds="))
@@ -19,7 +19,10 @@ func _run_metrics() -> void:
 	var total_attempts: int = 0
 	var max_attempts: int = 0
 	var min_radius: float = INF
-	var min_edge_gap: float = INF
+	var min_vertex_gap: float = INF
+	var accepted_radii: Array[float] = []
+	var accepted_vertex_gaps: Array[float] = []
+	var attempts_used: Array[int] = []
 
 	for seed_value in range(1, seed_count + 1):
 		var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -38,9 +41,14 @@ func _run_metrics() -> void:
 			accepted = true
 			var used: int = attempt + 1
 			total_attempts += used
+			attempts_used.append(used)
 			max_attempts = maxi(max_attempts, used)
-			min_radius = minf(min_radius, track_gd._min_turn_radius(path))
-			min_edge_gap = minf(min_edge_gap, _minimum_non_adjacent_gap(edges[0], edges[1]))
+			var radius: float = track_gd._min_turn_radius(path)
+			var vertex_gap: float = _minimum_non_adjacent_vertex_gap(edges[0], edges[1])
+			accepted_radii.append(radius)
+			accepted_vertex_gaps.append(vertex_gap)
+			min_radius = minf(min_radius, radius)
+			min_vertex_gap = minf(min_vertex_gap, vertex_gap)
 			break
 		if not accepted:
 			failures += 1
@@ -48,11 +56,35 @@ func _run_metrics() -> void:
 
 	var accepted_count: int = seed_count - failures
 	var average_attempts: float = float(total_attempts) / float(accepted_count) if accepted_count > 0 else INF
-	print("METRICS width=%.1f margin=%.1f min_radius_required=%.1f nonadjacent_anchor_gap=%.1f seeds=%d accepted=%d failed=%d avg_attempts=%.3f max_attempts=%d min_accepted_radius=%.3f min_nonadjacent_edge_gap=%.3f" % [track_gd.TRACK_WIDTH, track_gd.WALL_MARGIN, track_gd.MIN_TURN_RADIUS, track_gd.ANCHOR_MIN_GAP_OTHER, seed_count, accepted_count, failures, average_attempts, max_attempts, min_radius, min_edge_gap])
+	attempts_used.sort()
+	accepted_radii.sort()
+	accepted_vertex_gaps.sort()
+	var median_radius: float = _median_float(accepted_radii)
+	var median_vertex_gap: float = _median_float(accepted_vertex_gaps)
+	var p95_attempts: int = _percentile_int(attempts_used, 0.95)
+	var p99_attempts: int = _percentile_int(attempts_used, 0.99)
+	print("METRICS width=%.1f margin=%.1f min_radius_required=%.1f nonadjacent_anchor_gap=%.1f seeds=%d accepted=%d failed=%d fallback=%d avg_attempts=%.3f max_attempts=%d p95_attempts=%d p99_attempts=%d min_radius=%.3f median_radius=%.3f min_same_ring_vertex_gap=%.3f median_same_ring_vertex_gap=%.3f" % [track_gd.TRACK_WIDTH, track_gd.WALL_MARGIN, track_gd.MIN_TURN_RADIUS, track_gd.ANCHOR_MIN_GAP_OTHER, seed_count, accepted_count, failures, failures, average_attempts, max_attempts, p95_attempts, p99_attempts, min_radius, median_radius, min_vertex_gap, median_vertex_gap])
 	quit(0 if failures == 0 else 1)
 
 
-func _minimum_non_adjacent_gap(outer: PackedVector2Array, inner: PackedVector2Array) -> float:
+func _median_float(values: Array[float]) -> float:
+	if values.is_empty():
+		return INF
+	var middle: int = values.size() / 2
+	if values.size() % 2 == 1:
+		return values[middle]
+	return (values[middle - 1] + values[middle]) * 0.5
+
+
+func _percentile_int(values: Array[int], percentile: float) -> int:
+	if values.is_empty():
+		return 0
+	var index: int = mini(values.size() - 1, int(ceil(percentile * float(values.size()))) - 1)
+	return values[index]
+
+
+## Diagnostic only: same-ring vertex spacing, not segment-to-segment clearance.
+func _minimum_non_adjacent_vertex_gap(outer: PackedVector2Array, inner: PackedVector2Array) -> float:
 	var n: int = outer.size()
 	var minimum: float = INF
 	for i in range(n):
