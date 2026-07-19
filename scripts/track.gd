@@ -58,14 +58,19 @@ func _ready() -> void:
 static func validate_track(seed_value: int) -> bool:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var anchors: Array[Vector2] = _make_anchors(rng)
-	if not _anchors_ok(anchors):
-		return false
-	var path: PackedVector2Array = _build_center_path(anchors)
-	if _min_turn_radius(path) < MIN_TURN_RADIUS:
-		return false
-	var edges: Array = _build_edges(path)
-	return _ring_is_simple(edges[0]) and _ring_is_simple(edges[1])
+	# Mirror _generate_track(): a seed is valid when its deterministic
+	# generation stream produces a valid candidate within the same budget.
+	for _attempt in range(MAX_GEN_ATTEMPTS):
+		var anchors: Array[Vector2] = _make_anchors(rng)
+		if not _anchors_ok(anchors):
+			continue
+		var path: PackedVector2Array = _build_center_path(anchors)
+		if _min_turn_radius(path) < MIN_TURN_RADIUS:
+			continue
+		var edges: Array = _build_edges(path)
+		if _ring_is_simple(edges[0]) and _ring_is_simple(edges[1]):
+			return true
+	return false
 
 
 func _generate_track() -> void:
@@ -82,6 +87,7 @@ func _generate_track() -> void:
 	# otherwise; if every attempt fails, the last candidate is still
 	# playable because the offsets are curvature-clamped.
 	var edges: Array = []
+	var accepted: bool = false
 	for _attempt in range(MAX_GEN_ATTEMPTS):
 		var anchors: Array[Vector2] = _make_anchors(rng)
 		if not _anchors_ok(anchors):
@@ -91,12 +97,13 @@ func _generate_track() -> void:
 			continue
 		edges = _build_edges(_center_path)
 		if _ring_is_simple(edges[0]) and _ring_is_simple(edges[1]):
+			accepted = true
 			break
 
-	if edges.is_empty():
-		# Every attempt failed the anchor pre-filter; build from a final
-		# roll anyway (clamped offsets keep it locally valid).
-		_center_path = _build_center_path(_make_anchors(rng))
+	if not accepted:
+		# Do not install the last rejected candidate. A symmetric oval is a
+		# deterministic, simple fallback if the retry budget is exhausted.
+		_center_path = _build_safe_fallback_path()
 		edges = _build_edges(_center_path)
 
 	_road_outer = edges[0]
@@ -154,6 +161,8 @@ func _generate_track() -> void:
 
 	# 10. Start/finish line collision at first edge
 	_setup_start_finish_line(_road_outer[0], _road_outer[1], _road_inner[0], _road_inner[1])
+	# 10b. Ordered checkpoint gates use the generated road edges directly.
+	_build_checkpoint_gates()
 
 	# 11. Generate hazards along the track
 	_spawn_hazards(rng)
@@ -200,6 +209,18 @@ static func _build_center_path(anchors: Array[Vector2]) -> PackedVector2Array:
 	for _pass in range(RELAX_PASSES):
 		_relax_path(path, RELAX_WEIGHT)
 	_smooth_path_curvature(path)
+	return path
+
+
+## Deterministic circular fallback used only when random candidates exhaust
+## MAX_GEN_ATTEMPTS. Its radius leaves ample room for the full road width.
+static func _build_safe_fallback_path() -> PackedVector2Array:
+	var path: PackedVector2Array = PackedVector2Array()
+	path.resize(SPLINE_SAMPLES)
+	var radius: float = RADIUS_MAX
+	for i in range(SPLINE_SAMPLES):
+		var angle: float = TAU * float(i) / float(SPLINE_SAMPLES)
+		path[i] = Vector2(cos(angle), sin(angle)) * radius
 	return path
 
 
@@ -363,31 +384,28 @@ static func _relax_path(path: PackedVector2Array, weight: float) -> void:
 
 func _build_ring_wall(wall_node: StaticBody2D, edge: PackedVector2Array, push_outward: bool) -> void:
 	var n: int = edge.size()
-
-	# Push each edge vertex along its bisector normal (clamped miter) to get
-	# the wall's far edge. Adjacent quads share these junction vertices, so
-	# the wall ring is watertight: no corner gaps to slip through and no
-	# stray quad protruding into the road.
-	var far: PackedVector2Array = PackedVector2Array()
-	far.resize(n)
-	for i in range(n):
-		var prev: Vector2 = edge[(i - 1 + n) % n]
-		var next: Vector2 = edge[(i + 1) % n]
-		var tangent: Vector2 = (next - prev).normalized()
-		var normal: Vector2 = Vector2(-tangent.y, tangent.x)
-		var seg_dir: Vector2 = (next - edge[i]).normalized()
-		var seg_perp: Vector2 = Vector2(-seg_dir.y, seg_dir.x)
-		if push_outward:
-			normal = -normal
-			seg_perp = -seg_perp
-		# Miter scale keeps thickness on corners; clamp caps the spike on
-		# sharp vertices (wall thins slightly there instead of exploding).
-		var miter: float = 1.0 / clampf(normal.dot(seg_perp), 0.5, 1.0)
-		far[i] = edge[i] + normal * (WALL_THICKNESS * miter)
-
+	# Segment-normal quads keep each collision polygon convex. Extend along
+	# the segment so neighboring quads overlap only in the wall zone.
+	var extend: float = WALL_THICKNESS * 0.6
 	for i in range(n):
 		var j: int = (i + 1) % n
-		var quad: PackedVector2Array = PackedVector2Array([edge[i], edge[j], far[j], far[i]])
+		var a: Vector2 = edge[i]
+		var b: Vector2 = edge[j]
+		var segment: Vector2 = b - a
+		var length: float = segment.length()
+		if length < 0.001:
+			continue
+		var seg_dir: Vector2 = segment / length
+		var normal: Vector2 = Vector2(-seg_dir.y, seg_dir.x)
+		if push_outward:
+			normal = -normal
+		var extension: Vector2 = seg_dir * extend
+		var quad: PackedVector2Array = PackedVector2Array([
+			a - extension,
+			b + extension,
+			b + extension + normal * WALL_THICKNESS,
+			a - extension + normal * WALL_THICKNESS,
+		])
 
 		var coll: CollisionPolygon2D = CollisionPolygon2D.new()
 		coll.polygon = quad
@@ -454,20 +472,55 @@ func _draw_checkered_line(o1: Vector2, o2: Vector2, i1: Vector2, i2: Vector2) ->
 ## ── Start / Finish Line ───────────────────────────────────────────
 
 func _setup_start_finish_line(o1: Vector2, o2: Vector2, i1: Vector2, i2: Vector2) -> void:
-	var edge_dir: Vector2 = (o2 - o1).normalized()
 	var mid_outer: Vector2 = (o1 + o2) * 0.5
 	var mid_inner: Vector2 = (i1 + i2) * 0.5
 	var center: Vector2 = (mid_outer + mid_inner) * 0.5
+	var cross_dir: Vector2 = (mid_inner - mid_outer).normalized()
 
 	var sf: Area2D = $StartFinishLine as Area2D
 	sf.position = center
-	sf.rotation = edge_dir.angle()
+	sf.rotation = cross_dir.angle()
 
 	var shape: RectangleShape2D = RectangleShape2D.new()
 	shape.size = Vector2(TRACK_WIDTH, 20.0)
 
 	var col_shape: CollisionShape2D = $StartFinishLine/CollisionShape2D as CollisionShape2D
 	col_shape.shape = shape
+
+
+## Builds four cross-track Area2D gates from the generated edge pairs.
+## This is a gameplay hook only; it does not alter track geometry.
+func _build_checkpoint_gates() -> void:
+	var parent: Node2D = $Checkpoints
+	for child in parent.get_children():
+		child.queue_free()
+	var n: int = _center_path.size()
+	for checkpoint_index in range(4):
+		var sample: int = int(float(checkpoint_index + 1) * float(n) / 5.0)
+		var next: int = (sample + 1) % n
+		var outer_mid: Vector2 = (_road_outer[sample] + _road_outer[next]) * 0.5
+		var inner_mid: Vector2 = (_road_inner[sample] + _road_inner[next]) * 0.5
+		var gate: Area2D = Area2D.new()
+		gate.name = "Checkpoint%d" % checkpoint_index
+		gate.collision_layer = 0
+		gate.collision_mask = 2
+		gate.position = (outer_mid + inner_mid) * 0.5
+		gate.rotation = (inner_mid - outer_mid).angle()
+		var collision: CollisionShape2D = CollisionShape2D.new()
+		var shape: RectangleShape2D = RectangleShape2D.new()
+		shape.size = Vector2(outer_mid.distance_to(inner_mid), 32.0)
+		collision.shape = shape
+		gate.add_child(collision)
+		gate.body_entered.connect(_on_checkpoint_body_entered.bind(checkpoint_index))
+		parent.add_child(gate)
+
+
+func _on_checkpoint_body_entered(body: Node2D, checkpoint_index: int) -> void:
+	if not body.has_method("get_player_index"):
+		return
+	var race_manager: Node = get_node_or_null("/root/RaceManager")
+	if race_manager:
+		race_manager.cross_checkpoint(body, checkpoint_index)
 
 
 ## Generates oil slicks, boost pads, and ramps along the track.

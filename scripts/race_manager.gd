@@ -21,7 +21,7 @@ var countdown_timer: float = 1.0
 
 var cars: Array = []                      # all cars (players + AI)
 var _human_cars: Array = []               # only human players (for rubber-band baseline)
-var _car_checkpoints: Dictionary = {}     # car -> Array[bool]
+var _car_next_checkpoint: Dictionary = {} # car -> next required checkpoint index
 var _car_last_progress: Dictionary = {}   # car -> float 0..1
 var _car_laps: Dictionary = {}            # car -> int completed laps
 var _car_finish_time: Dictionary = {}     # car -> float seconds
@@ -64,10 +64,7 @@ func register_car(car, human: bool = false) -> void:
 	cars.append(car)
 	if human:
 		_human_cars.append(car)
-	var cp_flags: Array = []
-	for _i in range(NUM_CHECKPOINTS):
-		cp_flags.append(false)
-	_car_checkpoints[car] = cp_flags
+	_car_next_checkpoint[car] = 0
 	_car_last_progress[car] = 0.0
 	_car_laps[car] = 0
 	_car_finish_time[car] = -1.0
@@ -79,7 +76,7 @@ func register_car(car, human: bool = false) -> void:
 func reset_race_data() -> void:
 	cars.clear()
 	_human_cars.clear()
-	_car_checkpoints.clear()
+	_car_next_checkpoint.clear()
 	_car_last_progress.clear()
 	_car_laps.clear()
 	_car_finish_time.clear()
@@ -100,24 +97,19 @@ func start_race() -> void:
 	countdown_timer = 1.0
 
 
-# ─── Progress updates (tracks checkpoints only) ──────────
+# ─── Progress updates (ranking only) ───────────────────────────────
 func update_car_progress(car, progress: float) -> void:
 	_car_last_progress[car] = progress
 
-	if state != State.RACING:
-		return
-	if car in finish_order:
-		return
 
-	# Mark checkpoints visited
-	for i in range(NUM_CHECKPOINTS):
-		var cp_center: float = float(i) / float(NUM_CHECKPOINTS)
-		if _in_zone(progress, cp_center, ZONE_HALF_WIDTH):
-			_car_checkpoints[car][i] = true
-
-func _in_zone(progress: float, center: float, half_width: float) -> bool:
-	var diff: float = wrapf(progress - center, -0.5, 0.5)
-	return abs(diff) < half_width
+## Called by generated Area2D checkpoint gates. Out-of-order gates are
+## ignored; a missed gate blocks the lap until the required one is crossed.
+func cross_checkpoint(car, checkpoint_index: int) -> void:
+	if state != State.RACING or car in finish_order:
+		return
+	if checkpoint_index != _car_next_checkpoint.get(car, 0):
+		return
+	_car_next_checkpoint[car] = checkpoint_index + 1
 
 
 # ─── Start/finish line crossing (called by Area2D) ──────────
@@ -127,14 +119,7 @@ func cross_start_finish(car) -> void:
 	if car in finish_order:
 		return
 
-	# Check if all checkpoints were visited
-	var all_visited: bool = true
-	for flag in _car_checkpoints[car]:
-		if not flag:
-			all_visited = false
-			break
-
-	if all_visited:
+	if _car_next_checkpoint.get(car, 0) >= NUM_CHECKPOINTS:
 		# Lap completed
 		var now_ms: int = Time.get_ticks_msec()
 		var lap_duration_ms: int = now_ms - _car_lap_start_ms.get(car, now_ms)
@@ -148,8 +133,7 @@ func cross_start_finish(car) -> void:
 
 		# Reset for next lap
 		_car_lap_start_ms[car] = now_ms
-		for i in range(NUM_CHECKPOINTS):
-			_car_checkpoints[car][i] = false
+		_car_next_checkpoint[car] = 0
 
 		# Check for race finish
 		if _car_laps[car] >= TOTAL_LAPS:
@@ -197,6 +181,10 @@ func get_countdown_value() -> int:
 
 func get_lap(car) -> int:
 	return _car_laps.get(car, 0)
+
+
+func get_next_checkpoint(car) -> int:
+	return _car_next_checkpoint.get(car, 0)
 
 func get_position(car) -> int:
 	return _car_positions.get(car, 1)

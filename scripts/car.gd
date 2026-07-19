@@ -7,7 +7,6 @@ const MAX_SPEED: float = 800.0
 const ACCELERATION: float = 1200.0
 const BRAKE_FORCE: float = 1500.0
 const STEER_SPEED: float = 4.5
-const DRIFT_STEER_SPEED: float = 3.2
 const FRICTION: float = 300.0
 const DRIFT_SPEED_PENALTY: float = 50.0
 const REVERSE_MAX: float = 0.5
@@ -18,8 +17,6 @@ const WALL_SPEED_MULT: float = 0.15
 
 # Drift
 const DRIFT_ENTER_SPEED: float = 200.0
-const DRIFT_LATERAL_BLEED: float = 0.82
-const DRIFT_VELOCITY_SNAP: float = 0.35
 const DRIFT_ANGLE_MAX: float = 0.9
 const DRIFT_FILL_RATE: float = 0.55
 const MINI_BOOST_THRESHOLD: float = 0.30
@@ -28,6 +25,14 @@ const MINI_BOOST_MULT: float = 1.35
 const MINI_BOOST_TIME: float = 0.5
 const SUPER_BOOST_MULT: float = 1.65
 const SUPER_BOOST_TIME: float = 1.0
+
+@export_category("Handling")
+@export var normal_grip: float = 14.0
+@export var drift_grip: float = 2.4
+@export var drift_threshold: float = 0.15
+@export var drift_recovery_rate: float = 7.0
+@export var drift_steering_multiplier: float = 0.72
+@export var wall_speed_scrub: float = 0.55
 
 # Visual
 const CAR_WIDTH: float = 24.0
@@ -159,27 +164,23 @@ func _physics_process(delta: float) -> void:
 		drift_input = Input.is_action_pressed(input_prefix + "button1")
 
 	# 2. Steering
-	var steer_rate: float = DRIFT_STEER_SPEED if drift_active else STEER_SPEED
+	var steer_rate: float = STEER_SPEED * (drift_steering_multiplier if drift_active else 1.0)
 	if abs(steer_input) > 0.01:
 		rotation += steer_input * steer_rate * delta
 
 	# 3. Drift enter/exit
 	var abs_speed: float = abs(speed)
-	if drift_input and abs_speed > DRIFT_ENTER_SPEED and abs(steer_input) > 0.15 and not drift_active:
+	if drift_input and abs_speed > DRIFT_ENTER_SPEED and abs(steer_input) > drift_threshold and not drift_active:
 		drift_active = true
 	elif drift_active and (not drift_input or abs_speed < 40.0):
 		_release_drift()
 
 	# 4. Velocity build
 	var heading: Vector2 = Vector2.UP.rotated(rotation)
-	var heading_delta: float = wrapf(rotation - _prev_rotation, -PI, PI)
 	_prev_rotation = rotation
 
 	if drift_active:
-		var current_vel_len: float = velocity.length()
-		if current_vel_len > 5.0:
-			velocity = velocity.rotated(heading_delta * DRIFT_VELOCITY_SNAP)
-		else:
+		if velocity.length() <= 5.0:
 			velocity = heading * speed
 
 		if move_input > 0.0:
@@ -192,7 +193,8 @@ func _physics_process(delta: float) -> void:
 		var fwd_len: float = v_parallel.length()
 		if fwd_len > 0.0:
 			v_parallel = v_parallel.normalized() * maxf(fwd_len - DRIFT_SPEED_PENALTY * delta, 0.0)
-		velocity = v_parallel + v_perp * DRIFT_LATERAL_BLEED
+		var lateral_decay: float = exp(-drift_grip * delta)
+		velocity = v_parallel + v_perp * lateral_decay
 
 		speed = velocity.dot(heading)
 
@@ -215,7 +217,8 @@ func _physics_process(delta: float) -> void:
 				speed -= sign(speed) * FRICTION * delta
 		var effective_max: float = MAX_SPEED * surface_speed_mult
 		speed = clampf(speed, -effective_max * REVERSE_MAX, effective_max)
-		velocity = heading * speed
+		var grip_blend: float = 1.0 - exp(-normal_grip * delta)
+		velocity = velocity.lerp(heading * speed, grip_blend)
 
 	# 5. Boost
 	if boost_timer > 0.0:
@@ -224,10 +227,10 @@ func _physics_process(delta: float) -> void:
 		velocity += heading * boost_extra * delta * 4.0
 
 	# 6. Speed clamp (includes surface multiplier)
-	var _effective_max_clamp: float = MAX_SPEED * surface_speed_mult * 1.2
+	var effective_max_clamp: float = MAX_SPEED * surface_speed_mult * 1.2
 	var forward_speed_now: float = velocity.length()
-	if forward_speed_now > MAX_SPEED * 1.2:
-		velocity = velocity.normalized() * MAX_SPEED * 1.2
+	if forward_speed_now > effective_max_clamp:
+		velocity = velocity.normalized() * effective_max_clamp
 
 	# 7. Hazard effects
 	if _oil_timer > 0.0:
@@ -240,14 +243,20 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# Reconcile the speed model with what physics actually allowed: when we
-	# hit a wall or another car, actual motion drops, and `speed` must
-	# follow or the car grinds at phantom full speed (wrong HUD, endless
-	# wheel-spin against obstacles). get_real_velocity() reports what
-	# move_and_slide really did — `velocity` can keep its pre-slide value
-	# when the body is wedged between opposing contacts.
-	if get_slide_collision_count() > 0 and not drift_active:
-		speed = clampf(get_real_velocity().dot(heading), -MAX_SPEED, MAX_SPEED)
+	# Reconcile both grip and drift using actual wall motion. Removing only
+	# the inward velocity preserves a glancing slide along the wall.
+	if get_slide_collision_count() > 0:
+		var resolved_velocity: Vector2 = get_real_velocity()
+		for collision_index in range(get_slide_collision_count()):
+			var collision: KinematicCollision2D = get_slide_collision(collision_index)
+			if collision.get_collider() is StaticBody2D:
+				var normal: Vector2 = collision.get_normal()
+				var into_wall: float = resolved_velocity.dot(normal)
+				if into_wall < 0.0:
+					resolved_velocity -= normal * into_wall
+				resolved_velocity *= wall_speed_scrub
+		velocity = resolved_velocity
+		speed = clampf(velocity.dot(heading), -MAX_SPEED, MAX_SPEED)
 
 	_age_smoke(delta)
 	queue_redraw()
