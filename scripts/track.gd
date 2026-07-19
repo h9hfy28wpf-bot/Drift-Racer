@@ -9,11 +9,18 @@ const SPLINE_SAMPLES: int = 160
 const RELAX_PASSES: int = 2
 const RELAX_WEIGHT: float = 0.15
 const TRACK_WIDTH: float = 200.0
-const WALL_THICKNESS: float = 20.0
+const WALL_THICKNESS: float = 48.0
 const SPAWN_BEHIND: float = 80.0
 const RADIUS_MIN: float = 180.0
 const RADIUS_MAX: float = 420.0
 const JITTER_DEG: float = 20.0
+const WALL_MARGIN: float = 30.0
+const MIN_TURN_RADIUS: float = TRACK_WIDTH * 0.5 + WALL_MARGIN
+const MAX_GEN_ATTEMPTS: int = 60
+const OFFSET_SMOOTH_PASSES: int = 3
+const CURVATURE_SMOOTH_ITERS: int = 400
+const ANCHOR_MIN_GAP_ADJACENT: float = 50.0
+const ANCHOR_MIN_GAP_OTHER: float = TRACK_WIDTH + 2.0 * WALL_THICKNESS
 
 enum Surface { ROAD = 0, GRASS = 1, WALL = 2 }
 enum HazardType { OIL = 0, BOOST = 1, RAMP = 2 }
@@ -27,6 +34,8 @@ const HAZARD_START_SAFE_ZONE: int = 20
 
 var _road_outer: PackedVector2Array = PackedVector2Array()
 var _road_inner: PackedVector2Array = PackedVector2Array()
+var _off_outer: PackedFloat32Array = PackedFloat32Array()
+var _off_inner: PackedFloat32Array = PackedFloat32Array()
 var _center_path: PackedVector2Array = PackedVector2Array()
 var _seed: int = 0
 var _hazards: Array = []
@@ -42,25 +51,21 @@ func _ready() -> void:
 	_generate_track()
 
 
-## Headless validation: checks if a seed produces a valid closed loop.
+## Headless validation: checks if a seed produces a valid closed loop —
+## anchor spacing, spline curvature (hairpins tighter than MIN_TURN_RADIUS
+## self-intersect the road's offset edges), and finally that both offset
+## edge rings are simple polygons.
 static func validate_track(seed_value: int) -> bool:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var anchors: Array[Vector2] = []
-	var sector_deg: float = 360.0 / float(SECTORS)
-	var jitter_rad: float = deg_to_rad(JITTER_DEG)
-	for i in range(SECTORS):
-		var base_angle: float = deg_to_rad(float(i) * sector_deg)
-		var jitter: float = rng.randf_range(-jitter_rad, jitter_rad)
-		var angle: float = base_angle + jitter
-		var radius: float = rng.randf_range(RADIUS_MIN, RADIUS_MAX)
-		anchors.append(Vector2(cos(angle) * radius, sin(angle) * radius))
-	# Check no two anchors within 50px of each other (self-intersection guard)
-	for i in range(SECTORS):
-		for j in range(i + 1, SECTORS):
-			if anchors[i].distance_to(anchors[j]) < 50.0:
-				return false
-	return true
+	var anchors: Array[Vector2] = _make_anchors(rng)
+	if not _anchors_ok(anchors):
+		return false
+	var path: PackedVector2Array = _build_center_path(anchors)
+	if _min_turn_radius(path) < MIN_TURN_RADIUS:
+		return false
+	var edges: Array = _build_edges(path)
+	return _ring_is_simple(edges[0]) and _ring_is_simple(edges[1])
 
 
 func _generate_track() -> void:
@@ -70,42 +75,42 @@ func _generate_track() -> void:
 	else:
 		rng.randomize()
 
-	# 1. Place anchors — one per angular sector, randomized radius + jitter
-	var anchors: Array[Vector2] = []
-	var sector_deg: float = 360.0 / float(SECTORS)
-	var jitter_rad: float = deg_to_rad(JITTER_DEG)
+	# 1. Generate a valid layout: anchors -> curvature-smoothed spline ->
+	# clamped offset edges. Accept only if both edge rings are simple
+	# polygons (no self-intersection: that is the invariant the wall
+	# collision and the road Polygon2D triangulation depend on). Re-roll
+	# otherwise; if every attempt fails, the last candidate is still
+	# playable because the offsets are curvature-clamped.
+	var edges: Array = []
+	for _attempt in range(MAX_GEN_ATTEMPTS):
+		var anchors: Array[Vector2] = _make_anchors(rng)
+		if not _anchors_ok(anchors):
+			continue
+		_center_path = _build_center_path(anchors)
+		if _min_turn_radius(_center_path) < MIN_TURN_RADIUS:
+			continue
+		edges = _build_edges(_center_path)
+		if _ring_is_simple(edges[0]) and _ring_is_simple(edges[1]):
+			break
 
-	for i in range(SECTORS):
-		var base_angle: float = deg_to_rad(float(i) * sector_deg)
-		var jitter: float = rng.randf_range(-jitter_rad, jitter_rad)
-		var angle: float = base_angle + jitter
-		var radius: float = rng.randf_range(RADIUS_MIN, RADIUS_MAX)
-		anchors.append(Vector2(cos(angle) * radius, sin(angle) * radius))
+	if edges.is_empty():
+		# Every attempt failed the anchor pre-filter; build from a final
+		# roll anyway (clamped offsets keep it locally valid).
+		_center_path = _build_center_path(_make_anchors(rng))
+		edges = _build_edges(_center_path)
 
-	# Close the loop — append first anchor for wrap-around sampling
-	anchors.append(anchors[0])
+	_road_outer = edges[0]
+	_road_inner = edges[1]
+	_off_outer = edges[2]
+	_off_inner = edges[3]
 
-	# 2. Sample Catmull-Rom spline
-	_center_path = _sample_spline_closed(anchors, SPLINE_SAMPLES)
-
-	# 3. Light relaxation — each point pulled slightly toward neighbors
-	for _pass in range(RELAX_PASSES):
-		_relax_path(_center_path, RELAX_WEIGHT)
-
-	# 4. Build outer and inner road edges by offsetting center path normals
-	_road_outer.resize(_center_path.size())
-	_road_inner.resize(_center_path.size())
-
-	for i in range(_center_path.size()):
-		var tangent: Vector2 = _path_tangent(_center_path, i)
-		var perp: Vector2 = Vector2(-tangent.y, tangent.x)
-		var half_w: float = TRACK_WIDTH / 2.0
-		_road_outer[i] = _center_path[i] + perp * half_w
-		_road_inner[i] = _center_path[i] - perp * half_w
-
-	# 5. Road surface polygon
+	# 4. Road surface polygon: annulus as a "keyhole" polygon. Closing the
+	# outer ring (repeat outer[0]) before cutting to inner[0] makes the two
+	# cut edges coincide, so no slit is visible at the seam.
 	var road_poly: PackedVector2Array = PackedVector2Array()
 	road_poly.append_array(_road_outer)
+	road_poly.append(_road_outer[0])
+	road_poly.append(_road_inner[0])
 	var inner_rev: PackedVector2Array = _road_inner.duplicate()
 	inner_rev.reverse()
 	road_poly.append_array(inner_rev)
@@ -128,9 +133,14 @@ func _generate_track() -> void:
 	road.color = Color(0.25, 0.25, 0.28)   # dark asphalt color
 	road.z_index = -1
 
-	# 6. Wall collision
-	_build_ring_wall($OuterWall, _road_outer, true)
-	_build_ring_wall($InnerWall, _road_inner, false)
+	# 6. Wall collision. The anchor loop always winds counter-clockwise, so
+	# the bisector normals of both edge rings point toward the loop's
+	# interior; the flags below choose the flip that places each wall band
+	# OUTSIDE the road surface (island side for the inner edge, grass side
+	# for the outer edge). Getting this backwards puts invisible walls on
+	# the road itself — the original "invisible wall" bug.
+	_build_ring_wall($OuterWall, _road_outer, false)
+	_build_ring_wall($InnerWall, _road_inner, true)
 
 	# 7. Visual outlines
 	$OuterWallOutline.points = _road_outer
@@ -149,9 +159,156 @@ func _generate_track() -> void:
 	_spawn_hazards(rng)
 
 
+## ── Anchor / Path Generation ───────────────────────────────────────
+
+## One anchor per angular sector, randomized radius + jitter.
+static func _make_anchors(rng: RandomNumberGenerator) -> Array[Vector2]:
+	var anchors: Array[Vector2] = []
+	var sector_deg: float = 360.0 / float(SECTORS)
+	var jitter_rad: float = deg_to_rad(JITTER_DEG)
+	for i in range(SECTORS):
+		var base_angle: float = deg_to_rad(float(i) * sector_deg)
+		var jitter: float = rng.randf_range(-jitter_rad, jitter_rad)
+		var angle: float = base_angle + jitter
+		var radius: float = rng.randf_range(RADIUS_MIN, RADIUS_MAX)
+		anchors.append(Vector2(cos(angle) * radius, sin(angle) * radius))
+	return anchors
+
+
+## Anchor spacing pre-filter: ring-adjacent anchors may be close (the road
+## just flows through), but non-adjacent anchors closer than roughly the
+## road width guarantee overlapping road sections — reject early.
+static func _anchors_ok(anchors: Array[Vector2]) -> bool:
+	var n: int = anchors.size()
+	for i in range(n):
+		for j in range(i + 1, n):
+			var ring_gap: int = mini(j - i, n - (j - i))
+			var min_gap: float = ANCHOR_MIN_GAP_ADJACENT if ring_gap <= 1 else ANCHOR_MIN_GAP_OTHER
+			if anchors[i].distance_to(anchors[j]) < min_gap:
+				return false
+	return true
+
+
+## Closed, relaxed Catmull-Rom center path through the anchors, then
+## curvature-smoothed so no turn is tighter than MIN_TURN_RADIUS (random
+## anchor layouts routinely produce kinks with ~20px radius — far too
+## tight for a TRACK_WIDTH-wide road; see README).
+static func _build_center_path(anchors: Array[Vector2]) -> PackedVector2Array:
+	var closed: Array[Vector2] = anchors.duplicate()
+	closed.append(closed[0])
+	var path: PackedVector2Array = _sample_spline_closed(closed, SPLINE_SAMPLES)
+	for _pass in range(RELAX_PASSES):
+		_relax_path(path, RELAX_WEIGHT)
+	_smooth_path_curvature(path)
+	return path
+
+
+## Iteratively relaxes only the points whose local turn radius is below
+## target, opening hairpins into arcs the road can actually fit through.
+static func _smooth_path_curvature(path: PackedVector2Array) -> void:
+	var n: int = path.size()
+	var target: float = MIN_TURN_RADIUS * 1.15
+	for _iter in range(CURVATURE_SMOOTH_ITERS):
+		var copy: PackedVector2Array = path.duplicate()
+		var touched: bool = false
+		for i in range(n):
+			var r: float = absf(_signed_turn_radius(copy, i))
+			if r > 0.0 and r < target:
+				var prev: Vector2 = copy[(i - 1 + n) % n]
+				var next: Vector2 = copy[(i + 1) % n]
+				path[i] = path[i].lerp((prev + next) * 0.5, 0.5)
+				touched = true
+		if not touched:
+			return
+
+
+## Offsets the center path to both sides, clamping each offset so it never
+## reaches the local center of curvature (which would self-intersect the
+## offset curve). Returns [outer_edge, inner_edge, off_outer, off_inner].
+static func _build_edges(path: PackedVector2Array) -> Array:
+	var n: int = path.size()
+	var half_w: float = TRACK_WIDTH * 0.5
+	var off_outer: PackedFloat32Array = PackedFloat32Array()
+	var off_inner: PackedFloat32Array = PackedFloat32Array()
+	off_outer.resize(n)
+	off_inner.resize(n)
+	for i in range(n):
+		off_outer[i] = half_w
+		off_inner[i] = half_w
+		var r: float = _signed_turn_radius(path, i)
+		if r > 0.0:
+			off_outer[i] = minf(half_w, maxf(r - WALL_MARGIN, r * 0.5))
+		elif r < 0.0:
+			off_inner[i] = minf(half_w, maxf(-r - WALL_MARGIN, -r * 0.5))
+
+	# Smooth the clamped offsets (min with neighbor average only ever
+	# narrows, so the no-self-intersection guarantee is preserved).
+	for _pass in range(OFFSET_SMOOTH_PASSES):
+		var oc: PackedFloat32Array = off_outer.duplicate()
+		var ic: PackedFloat32Array = off_inner.duplicate()
+		for i in range(n):
+			var p: int = (i - 1 + n) % n
+			var q: int = (i + 1) % n
+			off_outer[i] = minf(oc[i], (oc[p] + oc[q]) * 0.5)
+			off_inner[i] = minf(ic[i], (ic[p] + ic[q]) * 0.5)
+
+	var outer: PackedVector2Array = PackedVector2Array()
+	var inner: PackedVector2Array = PackedVector2Array()
+	outer.resize(n)
+	inner.resize(n)
+	for i in range(n):
+		var tangent: Vector2 = _path_tangent(path, i)
+		var perp: Vector2 = Vector2(-tangent.y, tangent.x)
+		outer[i] = path[i] + perp * off_outer[i]
+		inner[i] = path[i] - perp * off_inner[i]
+	return [outer, inner, off_outer, off_inner]
+
+
+## True if the closed ring has no self-intersections (simple polygon).
+static func _ring_is_simple(ring: PackedVector2Array) -> bool:
+	var n: int = ring.size()
+	for i in range(n):
+		var a1: Vector2 = ring[i]
+		var a2: Vector2 = ring[(i + 1) % n]
+		for j in range(i + 2, n):
+			if i == 0 and j == n - 1:
+				continue  # adjacent segments share an endpoint
+			if Geometry2D.segment_intersects_segment(a1, a2, ring[j], ring[(j + 1) % n]) != null:
+				return false
+	return true
+
+
+## ── Curvature ──────────────────────────────────────────────────────
+
+## Signed radius of curvature at path[i] (circumradius of 3 consecutive
+## samples). Positive: center of curvature on the +perp side; negative:
+## on the -perp side; 0.0 means locally straight (infinite radius).
+static func _signed_turn_radius(path: PackedVector2Array, i: int) -> float:
+	var n: int = path.size()
+	var a: Vector2 = path[(i - 1 + n) % n]
+	var b: Vector2 = path[i]
+	var c: Vector2 = path[(i + 1) % n]
+	var d1: Vector2 = b - a
+	var d2: Vector2 = c - b
+	var cross: float = d1.cross(d2)
+	if absf(cross) < 0.0001:
+		return 0.0
+	var r: float = d1.length() * d2.length() * (c - a).length() / (2.0 * absf(cross))
+	return r if cross > 0.0 else -r
+
+
+static func _min_turn_radius(path: PackedVector2Array) -> float:
+	var min_r: float = INF
+	for i in range(path.size()):
+		var r: float = absf(_signed_turn_radius(path, i))
+		if r > 0.0:
+			min_r = minf(min_r, r)
+	return min_r
+
+
 ## ── Catmull-Rom Spline ─────────────────────────────────────────────
 
-func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
+static func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
 	var t2: float = t * t
 	var t3: float = t2 * t
 	return 0.5 * (
@@ -162,7 +319,7 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 	)
 
 
-func _sample_spline_closed(anchors: Array[Vector2], num_samples: int) -> PackedVector2Array:
+static func _sample_spline_closed(anchors: Array[Vector2], num_samples: int) -> PackedVector2Array:
 	var m: int = anchors.size() - 1  # Last anchor is duplicate of first
 	var result: PackedVector2Array = PackedVector2Array()
 	result.resize(num_samples)
@@ -183,7 +340,7 @@ func _sample_spline_closed(anchors: Array[Vector2], num_samples: int) -> PackedV
 	return result
 
 
-func _path_tangent(path: PackedVector2Array, i: int) -> Vector2:
+static func _path_tangent(path: PackedVector2Array, i: int) -> Vector2:
 	var n: int = path.size()
 	var prev: Vector2 = path[(i - 1 + n) % n]
 	var next: Vector2 = path[(i + 1) % n]
@@ -192,7 +349,7 @@ func _path_tangent(path: PackedVector2Array, i: int) -> Vector2:
 
 ## ── Relaxation ─────────────────────────────────────────────────────
 
-func _relax_path(path: PackedVector2Array, weight: float) -> void:
+static func _relax_path(path: PackedVector2Array, weight: float) -> void:
 	var n: int = path.size()
 	var copy: PackedVector2Array = path.duplicate()
 	for i in range(n):
@@ -206,22 +363,31 @@ func _relax_path(path: PackedVector2Array, weight: float) -> void:
 
 func _build_ring_wall(wall_node: StaticBody2D, edge: PackedVector2Array, push_outward: bool) -> void:
 	var n: int = edge.size()
+
+	# Push each edge vertex along its bisector normal (clamped miter) to get
+	# the wall's far edge. Adjacent quads share these junction vertices, so
+	# the wall ring is watertight: no corner gaps to slip through and no
+	# stray quad protruding into the road.
+	var far: PackedVector2Array = PackedVector2Array()
+	far.resize(n)
+	for i in range(n):
+		var prev: Vector2 = edge[(i - 1 + n) % n]
+		var next: Vector2 = edge[(i + 1) % n]
+		var tangent: Vector2 = (next - prev).normalized()
+		var normal: Vector2 = Vector2(-tangent.y, tangent.x)
+		var seg_dir: Vector2 = (next - edge[i]).normalized()
+		var seg_perp: Vector2 = Vector2(-seg_dir.y, seg_dir.x)
+		if push_outward:
+			normal = -normal
+			seg_perp = -seg_perp
+		# Miter scale keeps thickness on corners; clamp caps the spike on
+		# sharp vertices (wall thins slightly there instead of exploding).
+		var miter: float = 1.0 / clampf(normal.dot(seg_perp), 0.5, 1.0)
+		far[i] = edge[i] + normal * (WALL_THICKNESS * miter)
+
 	for i in range(n):
 		var j: int = (i + 1) % n
-		var a: Vector2 = edge[i]
-		var b: Vector2 = edge[j]
-
-		var edge_dir: Vector2 = (b - a).normalized()
-		var perp_dir: Vector2 = Vector2(-edge_dir.y, edge_dir.x)
-		if push_outward:
-			perp_dir = -perp_dir
-
-		var quad: PackedVector2Array = PackedVector2Array()
-		quad.resize(4)
-		quad[0] = a
-		quad[1] = b
-		quad[2] = b + perp_dir * WALL_THICKNESS
-		quad[3] = a + perp_dir * WALL_THICKNESS
+		var quad: PackedVector2Array = PackedVector2Array([edge[i], edge[j], far[j], far[i]])
 
 		var coll: CollisionPolygon2D = CollisionPolygon2D.new()
 		coll.polygon = quad
@@ -404,19 +570,29 @@ func _draw_hazards() -> void:
 
 
 ## Returns the surface type at a world position (road, grass, or wall).
-## Uses distance from nearest center_path point compared to TRACK_WIDTH/2.
+## Compares distance from the nearest center_path point against that
+## point's actual (curvature-clamped) edge offset for the relevant side.
 func get_surface_at(pos: Vector2) -> int:
-	if _center_path.size() == 0:
+	var n: int = _center_path.size()
+	if n == 0:
 		return Surface.WALL
 	var min_sq: float = INF
-	for pt in _center_path:
-		var sq: float = pt.distance_squared_to(pos)
+	var best_i: int = 0
+	for i in range(n):
+		var sq: float = _center_path[i].distance_squared_to(pos)
 		if sq < min_sq:
 			min_sq = sq
+			best_i = i
 	var dist: float = sqrt(min_sq)
-	if dist < TRACK_WIDTH * 0.5:
+	var half_w: float = TRACK_WIDTH * 0.5
+	if _off_outer.size() == n and _off_inner.size() == n:
+		var tangent: Vector2 = _path_tangent(_center_path, best_i)
+		var perp: Vector2 = Vector2(-tangent.y, tangent.x)
+		var outward: bool = (pos - _center_path[best_i]).dot(perp) >= 0.0
+		half_w = _off_outer[best_i] if outward else _off_inner[best_i]
+	if dist < half_w:
 		return Surface.ROAD
-	elif dist < TRACK_WIDTH * 0.5 + WALL_THICKNESS:
+	elif dist < half_w + WALL_THICKNESS:
 		return Surface.GRASS
 	else:
 		return Surface.WALL

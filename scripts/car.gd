@@ -62,6 +62,7 @@ var ai_drift: bool = false
 var _smoke_points: Array = []
 var _hazard_cooldowns: Dictionary = {}
 var _oil_timer: float = 0.0
+var _offtrack_timer: float = 0.0
 
 
 func _ready() -> void:
@@ -132,6 +133,17 @@ func _physics_process(delta: float) -> void:
 			surface_speed_mult = GRASS_SPEED_MULT
 		elif surface == Track.Surface.WALL:
 			surface_speed_mult = WALL_SPEED_MULT
+
+		# Rescue: WALL surface means the car is beyond the wall band (it was
+		# shoved through by a car-vs-car depenetration or similar glitch).
+		# After a short grace period, place it back on the track.
+		if surface == Track.Surface.WALL:
+			_offtrack_timer += delta
+			if _offtrack_timer > 1.5:
+				_rescue_to_track()
+				_offtrack_timer = 0.0
+		else:
+			_offtrack_timer = 0.0
 
 	# 1. Read input
 	var move_input: float
@@ -227,8 +239,35 @@ func _physics_process(delta: float) -> void:
 	_process_hazard_collisions()
 
 	move_and_slide()
+
+	# Reconcile the speed model with what physics actually allowed: when we
+	# hit a wall or another car, actual motion drops, and `speed` must
+	# follow or the car grinds at phantom full speed (wrong HUD, endless
+	# wheel-spin against obstacles). get_real_velocity() reports what
+	# move_and_slide really did — `velocity` can keep its pre-slide value
+	# when the body is wedged between opposing contacts.
+	if get_slide_collision_count() > 0 and not drift_active:
+		speed = clampf(get_real_velocity().dot(heading), -MAX_SPEED, MAX_SPEED)
+
 	_age_smoke(delta)
 	queue_redraw()
+
+
+## Snaps the car back onto the centerline, facing along the track.
+func _rescue_to_track() -> void:
+	if not track or not track.has_method("get_center_progress"):
+		return
+	var progress: float = track.get_center_progress(global_position)
+	var here: Vector2 = track.get_center_position_at(progress)
+	var ahead: Vector2 = track.get_center_position_at(fposmod(progress + 0.02, 1.0))
+	global_position = here
+	velocity = Vector2.ZERO
+	speed = 0.0
+	boost_timer = 0.0
+	drift_active = false
+	if ahead != here:
+		rotation = (ahead - here).angle() + PI / 2.0
+		_prev_rotation = rotation
 
 
 func _release_drift() -> void:
